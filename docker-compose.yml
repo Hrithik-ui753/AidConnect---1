@@ -1,0 +1,172 @@
+version: '3.8'
+
+services:
+  # MongoDB Database
+  mongodb:
+    image: mongo:7.0
+    restart: unless-stopped
+    environment:
+      MONGO_INITDB_ROOT_USERNAME: aidconnect_admin
+      MONGO_INITDB_ROOT_PASSWORD: aidconnect_password_2024
+      MONGO_INITDB_DATABASE: aidconnect
+    ports:
+      - "27017:27017"
+    volumes:
+      - mongodb_data:/data/db
+      - ./backend/scripts/mongo-init.js:/docker-entrypoint-initdb.d/mongo-init.js:ro
+    networks:
+      - aidconnect-network
+
+  # Redis Cache
+  redis:
+    image: redis:7.2-alpine
+    restart: unless-stopped
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    networks:
+      - aidconnect-network
+
+  # Flask Backend API
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    environment:
+      - FLASK_ENV=production
+      - MONGO_URI=mongodb://aidconnect_admin:aidconnect_password_2024@mongodb:27017/aidconnect?authSource=admin
+      - REDIS_URL=redis://redis:6379/0
+      - JWT_SECRET_KEY=aidconnect_jwt_secret_key_2024
+      - ANCHOR_PROVIDER=simulated
+      - MERKLE_BATCH_WANNOW_HOURS=24
+      - FLASK_ENV=production
+    ports:
+      - "5000:5000"
+    depends_on:
+      - mongodb
+      - redis
+    volumes:
+      - ./backend:/app
+      - backend_logs:/app/logs
+    networks:
+      - aidconnect-network
+
+  # Celery Worker for Background Tasks
+  celery-worker:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    command: celery -A workers.celery_worker worker --loglevel=info
+    environment:
+      - FLASK_ENV=production
+      - MONGO_URI=mongodb://aidconnect_admin:aidconnect_password_2024@mongodb:27017/aidconnect?authSource=admin
+      - REDIS_URL=redis://redis:6379/0
+      - JWT_SECRET_KEY=aidconnect_jwt_secret_key_2024
+      - ANCHOR_PROVIDER=simulated
+    depends_on:
+      - mongodb
+      - redis
+      - backend
+    volumes:
+      - ./backend:/app
+      - worker_logs:/app/logs
+    networks:
+      - aidconnect-network
+
+  # React Frontend
+  frontend:
+    build:
+      context: .
+      dockerfile: ./infra/Dockerfile.frontend
+    restart: unless-stopped
+    environment:
+      - VITE_API_BASE_URL=http://backend:5000
+      - VITE_FIREBASE_API_KEY=AIzaSyAcEs4tlccPyyRVy90adoy95gDSnOv0FfU
+      - VITE_FIREBASE_AUTH_DOMAIN=aidconnect-7a599.firebaseapp.com
+      - VITE_FIREBASE_PROJECT_ID=aidconnect-7a599
+    ports:
+      - "5173:5173"
+    depends_on:
+      - backend
+    volumes:
+      - ./src:/app/src
+      - ./public:/app/public
+    networks:
+      - aidconnect-network
+
+  # ML Service for Hotspot Prediction
+  ml-service:
+    build:
+      context: ./ml
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    environment:
+      - FLASK_ENV=production
+      - MODEL_PATH=/app/models/hotspot_model.pkl
+      - REDIS_URL=redis://redis:6379/1
+    ports:
+      - "5001:5001"
+    depends_on:
+      - redis
+    volumes:
+      - ./ml:/app
+      - ml_models:/app/models
+      - ml_logs:/app/logs
+    networks:
+      - aidconnect-network
+
+  # Redis Queue Monitor (Optional)
+  redis-insight:
+    image: redislabs/redisinsight:latest
+    restart: unless-stopped
+    ports:
+      - "8001:8001"
+    volumes:
+      - redis_insight_data:/data
+    networks:
+      - aidconnect-network
+
+volumes:
+  mongodb_data:
+    driver: local
+  redis_data:
+    driver: local
+  backend_logs:
+    driver: local
+  worker_logs:
+    driver: local
+  ml_models:
+    driver: local
+  ml_logs:
+    driver: local
+  redis_insight_data:
+    driver: local
+
+networks:
+  aidconnect-network:
+    driver: bridge
+
+# Development overrides
+---
+version: '3.8'
+
+services:
+  # Override for development
+  backend:
+    environment:
+      - FLASK_ENV=development
+      - DEBUG=True
+    volumes:
+      - ./backend:/app
+    command: python app.py
+
+  frontend:
+    environment:
+      - VITE_MODE=development
+    volumes:
+      - ./src:/app/src
+      - ./public:/app/public
+    command: npm run dev -- --host 0.0.0.0 --port 5173
